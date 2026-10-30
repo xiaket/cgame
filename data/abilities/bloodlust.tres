@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="AbilityDefinition" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/data/ability_definition.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = "bloodlust"
+title = "Bloodlust"
+kind = "passive"
+description = "Your kills grant +40% damage for 4 seconds. Kills refresh duration."
+damage = 0.0
+cooldown = 0.0
+reach = 0.0
+radius = 0.0
+color = Color(1, 0.56, 0.51, 1)

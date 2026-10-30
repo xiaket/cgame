@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="AbilityDefinition" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/data/ability_definition.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = "cleave"
+title = "Cleave"
+kind = "basic"
+description = "A wide sweep that hits every enemy in its arc."
+damage = 21.0
+cooldown = 0.0
+reach = 112.0
+radius = 70.0
+color = Color(0.52, 0.89, 0.76, 1)

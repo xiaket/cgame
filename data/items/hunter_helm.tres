@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="ItemDefinition" load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/data/item_definition.gd" id="1"]
+[ext_resource type="Resource" path="res://data/abilities/bloodlust.tres" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = "hunter_helm"
+title = "Hunter Helm"
+slot = "helmet"
+ability = ExtResource("2")
+health = 0.0
+attack = 6.0
+speed = 8.0
+attack_speed = 0.0

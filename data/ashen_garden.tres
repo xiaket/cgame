@@ -1,0 +1,12 @@
+[gd_resource type="Resource" script_class="LevelDefinition" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/data/level_definition.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+title = "The Ashen Garden"
+wave_sizes = PackedInt32Array(7, 9, 11)
+ranged_interval = 3
+boss_wave = 3
+wave_break = 2.8
+enemy_growth = 0.25

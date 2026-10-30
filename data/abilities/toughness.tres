@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="AbilityDefinition" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/data/ability_definition.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = "toughness"
+title = "Toughness"
+kind = "passive"
+description = "Gain 65 maximum health while equipped."
+damage = 0.0
+cooldown = 0.0
+reach = 0.0
+radius = 0.0
+color = Color(0.62, 0.85, 0.62, 1)

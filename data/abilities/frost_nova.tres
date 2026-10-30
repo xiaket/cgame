@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="AbilityDefinition" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/data/ability_definition.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = "frost_nova"
+title = "Frost Nova"
+kind = "power"
+description = "Freeze the area: damage and 60% slow for 3.5s. 5s cooldown."
+damage = 46.0
+cooldown = 5.0
+reach = 175.0
+radius = 175.0
+color = Color(0.46, 0.82, 1, 1)
