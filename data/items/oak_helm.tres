@@ -9,7 +9,3 @@ id = "oak_helm"
 title = "Oak Helm"
 slot = "helmet"
 ability = ExtResource("2")
-health = 18.0
-attack = 0.0
-speed = 0.0
-attack_speed = 0.0

@@ -9,7 +9,3 @@ id = "frost_orb"
 title = "Frost Orb"
 slot = "offhand"
 ability = ExtResource("2")
-health = 12.0
-attack = 6.0
-speed = 0.0
-attack_speed = 0.0

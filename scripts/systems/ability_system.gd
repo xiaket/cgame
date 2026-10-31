@@ -23,8 +23,8 @@ func use(slot: String, target: Vector2) -> bool:
 	if direction == Vector2.ZERO:
 		direction = hero.facing
 	hero.facing = direction
-	var damage = (ability.damage + hero.attack) * hero.damage_multiplier()
-	cooldowns[slot] = (1.0 / (2.4 * hero.attack_speed)) if ability.kind == "basic" else ability.cooldown
+	var damage = hero.skill_damage(ability)
+	cooldowns[slot] = hero.effective_cooldown(ability)
 	match ability.id:
 		"slash", "cleave":
 			var targets: Array[ArenaEnemy] = []
@@ -36,17 +36,17 @@ func use(slot: String, target: Vector2) -> bool:
 					targets.append(enemy)
 			targets.sort_custom(func(a, b): return hero.position.distance_squared_to(a.position) < hero.position.distance_squared_to(b.position))
 			for enemy in targets:
-				enemy.take_damage(damage, hero)
+				enemy.take_damage(damage * (1.0 + hero.equipment.bonus("elite_damage") / 100.0 if enemy.kind == "boss" else 1.0), hero)
 				if ability.id == "slash":
 					break
 			game.effect(hero.position, ability.reach, ability.color, "slash", direction.angle())
 		"fireball":
-			game.spawn_projectile(hero.position + direction * 25, direction, damage, true, ability.radius, ability.color)
+			game.spawn_projectile(hero.position + direction * 25, direction, damage, true, ability.radius, ability.color, hero.equipment.bonus("elite_damage"))
 		"frost_nova":
 			for enemy in game.enemies.duplicate():
 				if not enemy.dead and enemy.position.distance_to(hero.position) <= ability.radius + enemy.radius:
 					enemy.slow_remaining = 3.5
-					enemy.take_damage(damage, hero)
+					enemy.take_damage(damage * (1.0 + hero.equipment.bonus("elite_damage") / 100.0 if enemy.kind == "boss" else 1.0), hero)
 			game.effect(hero.position, ability.radius, ability.color, "ring")
 	game.events.ability_used.emit(ability.id)
 	return true

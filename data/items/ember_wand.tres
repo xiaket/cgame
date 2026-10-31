@@ -9,7 +9,3 @@ id = "ember_wand"
 title = "Ember Wand"
 slot = "weapon"
 ability = ExtResource("2")
-health = 0.0
-attack = 12.0
-speed = 0.0
-attack_speed = 0.0

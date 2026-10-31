@@ -9,7 +9,3 @@ id = "ember_orb"
 title = "Ember Orb"
 slot = "offhand"
 ability = ExtResource("2")
-health = 0.0
-attack = 10.0
-speed = 0.0
-attack_speed = 0.0

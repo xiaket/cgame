@@ -20,9 +20,15 @@ func check(condition: bool, title: String) -> void:
 		print("PASS: " + title)
 
 func put(slot: String, id: String) -> void:
-	game.equipment.slots[slot] = Gear.new(Catalog.item(id)) if id != "" else null
+	game.equipment.slots[slot] = fixture(id) if id != "" else null
 	game.events.equipment_changed.emit()
 	game.abilities.cooldowns[slot] = 0.0
+
+func fixture(id: String) -> Gear:
+	var gear = Gear.new(Catalog.item(id), 0, 1, false)
+	var key = "magic_attack" if id in ["ember_orb", "ember_wand", "winter_focus", "frost_orb"] else "physical_attack"
+	gear.primary_affixes.append({"id": "health" if id == "oak_helm" else key, "value": 18.0 if id == "oak_helm" else 7.0})
+	return gear
 
 func clear_enemies() -> void:
 	for enemy in game.enemies.duplicate():
@@ -41,6 +47,11 @@ func run() -> void:
 	game = load("res://scenes/main.tscn").instantiate()
 	root.add_child(game)
 	game.set_process(false)
+	# Fixed geometry isolates existing combat and UI regression fixtures.
+	game.level = game.LEVEL_TEMPLATE.duplicate(true)
+	game.world_map = JourneyMap.new(game.level)
+	game.arena = game.world_map.bounds
+	game.player.world_map = game.world_map
 	await process_frame
 	seed(12345)
 	check(game.equipment.slots.values().all(func(gear): return gear == null), "Launch ignores old save and starts unequipped")
@@ -52,14 +63,17 @@ func run() -> void:
 	check(game.equipment.slots.weapon == null, "Picking up gear does not auto-equip")
 	game.equipment.equip(0)
 	game._process(3)
-	check(game.wave == 1, "Equipping first weapon starts the encounter")
+	check(game.wave == 0, "Equipping at camp does not summon enemies before exploration")
+	game.player.position = Vector2(game.level.encounter_triggers[0] + 20, 439)
+	game._process(3)
+	check(game.wave == 1, "Reaching the first garden with a weapon starts the encounter")
 	clear_enemies()
 	game.wave = 0
 	game.wave_delay = 2
 	# Combat fixtures are explicit; they are never granted on a real launch.
 	game.equipment.inventory.clear()
 	for id in ["iron_blade", "ember_orb", "oak_helm", "ruby_pendant"]:
-		var gear = Gear.new(Catalog.item(id))
+		var gear = fixture(id)
 		game.equipment.slots[gear.definition.slot] = gear
 	game.events.equipment_changed.emit()
 	game.player.health = game.player.max_health
@@ -75,7 +89,7 @@ func run() -> void:
 	game.player.position = Vector2(600, 440)
 	var health: float = game.player.health
 	game.equipment.unequip("helmet")
-	check(game.player.max_health == 140, "Unequipping removes passive and base stats")
+	check(game.player.max_health == 140, "Unequipping removes passive and rolled stats")
 	check(game.player.health <= health, "Changing HP gear cannot heal")
 	var index: int = game.equipment.inventory.size() - 1
 	game.equipment.equip(index)
@@ -147,10 +161,7 @@ func run() -> void:
 	game.drops.append({"position": game.player.position, "gear": Gear.new(Catalog.item("frost_orb"), 2, 3)})
 	game.drops.append({"position": Vector2(1300, 700), "gear": Gear.new(Catalog.item("oak_helm"))})
 	check(game.pickup_nearby() == 1 and game.drops.size() == 1, "F only collects nearby drops")
-	check(LootSystem.roll(3, true).rarity == 2, "Boss guarantees Epic loot")
-	var common = Gear.new(Catalog.item("iron_blade"))
-	var epic = Gear.new(Catalog.item("iron_blade"), 2, 3)
-	check(epic.stat("attack") > common.stat("attack"), "Quality and level improve attributes")
+	check(LootSystem.roll(3, true).rarity == 2, "Boss guarantees yellow Rare loot")
 	game.player.health = game.player.max_health
 	first = game.spawn_enemy("ranged", game.player.position + Vector2(230, 0))
 	first.cooldown = 0
@@ -190,10 +201,11 @@ func run() -> void:
 			enemy.take_damage(10000, game.player)
 	game.wave_delay = 0
 	game._process(0.01)
-	check(game.state == "victory" and game.kills == 28, "Killing all 28 enemies completes level")
-	check(game.drops.is_empty(), "Completion collects all loot")
-	game.restart()
-	check(game.expedition == 2 and game.wave == 0 and game.state == "combat", "Victory restart advances expedition")
+	check(game.state == "combat" and game.kills == 28 and game.exit_ready(), "Killing all 28 enemies unlocks the exit and keeps exploration active")
+	game.player.position = game.level.exit_point
+	game._process(game.level.exit_hold_seconds)
+	check(game.drops.is_empty(), "Exit transition collects all loot")
+	check(game.expedition == 2 and game.wave == 0 and game.state == "combat", "Holding at the exit automatically advances expedition")
 	check(game.player.health == game.player.max_health, "Restart restores HP")
 	game.player.take_damage(9999, null, game.events)
 	game._process(0.01)

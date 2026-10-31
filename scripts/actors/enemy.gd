@@ -46,16 +46,16 @@ func tick(delta: float) -> void:
 		if boss_windup <= 0:
 			game.effect(boss_target, 100, Color("ef805c"), "ring")
 			if game.player.position.distance_to(boss_target) < 116:
-				game.player.take_damage(power * 1.6, self, game.events)
+				game.player.take_damage(power * 1.6, self, game.events, "physical", "melee", true)
 		queue_redraw()
 		return
-	var movement = offset.normalized()
+	var movement = game.world_map.steer(position, game.player.position, radius)
 	if kind == "ranged":
 		if distance < 190:
 			movement = -movement
 		elif distance < 340:
 			movement = Vector2.ZERO
-		if cooldown <= 0 and distance < 600:
+		if cooldown <= 0 and distance < 600 and game.world_map.line_clear(position, game.player.position):
 			game.spawn_projectile(position, offset.normalized(), power, false, 0, Color("ff8b88"))
 			cooldown = 1.9
 	elif kind == "boss" and cooldown <= 0 and distance < 430:
@@ -72,8 +72,8 @@ func tick(delta: float) -> void:
 				var difference: Vector2 = position - other.position
 				if difference.length_squared() < pow(radius + other.radius + 5, 2):
 					separation += difference.normalized() * 0.7
-		position += (movement + separation).limit_length() * speed * (0.4 if slow_remaining > 0 else 1.0) * delta
-		position = position.clamp(game.arena.position + Vector2.ONE * radius, game.arena.end - Vector2.ONE * radius)
+		var displacement = (movement + separation).limit_length() * speed * (0.4 if slow_remaining > 0 else 1.0) * delta
+		position = game.world_map.move_actor(position, displacement, radius)
 	queue_redraw()
 
 func take_damage(amount: float, source: Node) -> void:

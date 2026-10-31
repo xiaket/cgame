@@ -9,7 +9,3 @@ id = "stone_pendant"
 title = "Stone Pendant"
 slot = "necklace"
 ability = ExtResource("2")
-health = 14.0
-attack = 0.0
-speed = 0.0
-attack_speed = 5.0

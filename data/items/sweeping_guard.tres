@@ -9,7 +9,3 @@ id = "sweeping_guard"
 title = "Sweeping Guard"
 slot = "offhand"
 ability = ExtResource("2")
-health = 8.0
-attack = 6.0
-speed = 0.0
-attack_speed = 5.0

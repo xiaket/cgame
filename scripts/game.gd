@@ -1,12 +1,23 @@
 extends Node2D
 
-const ARENA = Rect2(48, 142, 1344, 594)
+const PLAY_AREA = Rect2(48, 142, 1344, 594)
 const BG = Color("101d24")
 const INK = Color("dce6e4")
 const MUTED = Color("8caaa9")
 const GOLD = Color("eac687")
-var arena = ARENA
-var level: LevelDefinition = preload("res://data/ashen_garden.tres")
+var arena: Rect2
+var world_map: JourneyMap
+var camera: Camera2D
+var exit_hold: float = 0.0
+var inventory_filter: String = ""
+var inventory_filter_picker: OptionButton
+const LEVEL_TEMPLATE = preload("res://data/ashen_garden.tres")
+var level: LevelDefinition
+var map_seed: int = -1
+var map_rng = RandomNumberGenerator.new()
+var aim_target: ArenaEnemy
+var last_mouse: Vector2
+var input_blocked: bool = false
 var events: CombatEvents
 var equipment: Equipment
 var abilities: AbilitySystem
@@ -49,14 +60,20 @@ var end_detail: Label
 var help_panel: PanelContainer
 
 func _ready() -> void:
+	map_rng.randomize()
+	generate_map(map_seed if map_seed >= 0 else map_rng.randi())
+	camera = Camera2D.new()
+	add_child(camera)
 	events = CombatEvents.new()
 	add_child(events)
 	equipment = Equipment.new()
 	equipment.events = events
 	player = Hero.new()
 	player.equipment = equipment
-	player.position = arena.get_center()
+	player.world_map = world_map
+	player.position = level.spawn_point
 	add_child(player)
+	update_camera()
 	abilities = AbilitySystem.new()
 	abilities.game = self
 	events.equipment_changed.connect(_on_equipment_changed)
@@ -68,6 +85,7 @@ func _ready() -> void:
 	player.health = player.max_health
 	build_ui()
 	loading = false
+	last_mouse = get_viewport().get_mouse_position()
 	refresh_inventory()
 	toast("Fresh start · F to collect starter gear · I to equip it · WASD to move", 10)
 
@@ -80,7 +98,9 @@ func place_starting_supplies() -> void:
 			return
 	for index in range(2):
 		var id = "iron_blade" if index == 0 else "ember_orb"
-		drops.append({"position": player.position + Vector2(-35 + index * 70, 35), "gear": Gear.new(Catalog.item(id))})
+		var starter = Gear.new(Catalog.item(id), 0, 1, false)
+		starter.primary_affixes.append({"id": "physical_attack" if id == "iron_blade" else "magic_attack", "value": 7.0})
+		drops.append({"position": player.position + Vector2(-35 + index * 70, 35), "gear": starter})
 
 func _process(delta: float) -> void:
 	if loading:
@@ -93,31 +113,40 @@ func _process(delta: float) -> void:
 		var direction = Vector2(float(Input.is_physical_key_pressed(KEY_D)) - float(Input.is_physical_key_pressed(KEY_A)), float(Input.is_physical_key_pressed(KEY_S)) - float(Input.is_physical_key_pressed(KEY_W)))
 		direction += Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
 		player.tick(delta, direction, arena)
+		update_camera()
 		var mouse = get_global_mouse_position()
-		player.facing = player.position.direction_to(mouse)
+		var screen_mouse = get_viewport().get_mouse_position()
+		var mouse_attack = (Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) or Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)) and not pointer_over_ui()
+		var key_attack = Input.is_physical_key_pressed(KEY_Q) or Input.is_physical_key_pressed(KEY_E)
+		var any_attack = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) or Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) or key_attack
+		if input_blocked and not any_attack:
+			input_blocked = false
+		if screen_mouse.distance_to(last_mouse) > 4 and not pointer_over_ui() and PLAY_AREA.has_point(screen_mouse) and mouse.distance_to(player.position) > 12:
+			player.facing = player.position.direction_to(mouse)
+		elif not any_attack and direction.length_squared() > 0:
+			player.facing = direction.normalized()
+		if screen_mouse.distance_to(last_mouse) > 4:
+			last_mouse = screen_mouse
 		abilities.tick(delta)
-		if arena.has_point(mouse) and not pointer_over_ui():
-			if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
-				abilities.use("weapon", mouse)
-			if Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
-				abilities.use("offhand", mouse)
-		if Input.is_physical_key_pressed(KEY_Q):
-			abilities.use("weapon", mouse)
-		if Input.is_physical_key_pressed(KEY_E):
-			abilities.use("offhand", mouse)
+		aim_target = null
+		if not input_blocked:
+			if mouse_attack and PLAY_AREA.has_point(screen_mouse):
+				if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+					assisted_attack("weapon", false)
+				if Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+					assisted_attack("offhand", false)
+			if Input.is_physical_key_pressed(KEY_Q):
+				assisted_attack("weapon", true)
+			if Input.is_physical_key_pressed(KEY_E):
+				assisted_attack("offhand", true)
 		for enemy in enemies.duplicate():
 			if not enemy.dead:
 				enemy.tick(delta)
 		tick_projectiles(delta)
 		if player.dead:
 			finish(false)
-		elif enemies.is_empty() and (wave > 0 or equipment.slots.weapon != null or equipment.slots.offhand != null):
-			wave_delay -= delta
-			if wave_delay <= 0:
-				if wave >= level.wave_sizes.size():
-					finish(true)
-				else:
-					spawn_wave()
+		else:
+			tick_progression(delta)
 	for i in range(effects.size() - 1, -1, -1):
 		effects[i].life -= delta
 		if effects[i].life <= 0:
@@ -130,6 +159,58 @@ func _process(delta: float) -> void:
 	update_ui()
 	queue_redraw()
 
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+		clear_attack_input()
+
+func generate_map(next_seed: int) -> void:
+	map_seed = next_seed
+	level = JourneyMap.generate(LEVEL_TEMPLATE, map_seed)
+	world_map = JourneyMap.new(level)
+	arena = world_map.bounds
+	if player != null:
+		player.world_map = world_map
+
+func clear_attack_input() -> void:
+	aim_target = null
+	input_blocked = true
+
+func assisted_attack(slot: String, automatic: bool = true) -> bool:
+	if bag_open or help_open or player.dead or state != "combat" or input_blocked:
+		return false
+	var gear: Gear = equipment.slots[slot]
+	if gear == null:
+		return false
+	var direction = player.facing
+	if not automatic and player.position.distance_to(get_global_mouse_position()) > 12:
+		direction = player.position.direction_to(get_global_mouse_position())
+	aim_target = AimAssist.choose(player, gear.definition.ability, enemies, world_map, direction, automatic)
+	var target = aim_target.position if aim_target != null else player.position + direction * 100
+	return abilities.use(slot, target)
+
+func update_camera() -> void:
+	camera.position = Vector2(clampf(player.position.x, PLAY_AREA.get_center().x, arena.end.x - PLAY_AREA.size.x / 2.0), 450)
+	camera.force_update_scroll()
+
+func exit_ready() -> bool:
+	return wave >= level.wave_sizes.size() and enemies.is_empty() and not player.dead
+
+func tick_progression(delta: float) -> void:
+	if state != "combat" or bag_open or help_open or player.dead:
+		return
+	if enemies.is_empty() and wave < level.wave_sizes.size() and (equipment.slots.weapon != null or equipment.slots.offhand != null):
+		if player.position.x >= level.encounter_triggers[wave]:
+			wave_delay -= delta
+			if wave_delay <= 0:
+				spawn_wave()
+	if exit_ready() and player.position.distance_to(level.exit_point) <= level.exit_radius:
+		exit_hold += delta
+		if exit_hold >= level.exit_hold_seconds:
+			finish(true)
+			restart()
+	else:
+		exit_hold = 0.0
+
 func pointer_over_ui() -> bool:
 	var hovered = get_viewport().gui_get_hovered_control()
 	return hovered != null and hovered.mouse_filter != Control.MOUSE_FILTER_IGNORE
@@ -137,6 +218,8 @@ func pointer_over_ui() -> bool:
 func _unhandled_key_input(event: InputEvent) -> void:
 	if not event is InputEventKey or not event.pressed or event.echo:
 		return
+	if event.physical_keycode in [KEY_I, KEY_TAB, KEY_H, KEY_ESCAPE]:
+		clear_attack_input()
 	match event.physical_keycode:
 		KEY_I, KEY_TAB:
 			toggle_bag()
@@ -147,6 +230,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			if state != "combat":
 				restart()
 		KEY_H:
+			clear_attack_input()
 			help_open = not help_open
 			help_panel.visible = help_open
 		KEY_ESCAPE:
@@ -166,14 +250,15 @@ func spawn_wave() -> void:
 	var count = level.wave_sizes[wave - 1]
 	for i in range(count):
 		var angle = TAU * float(i) / count + wave * 0.4
-		var point = arena.get_center() + Vector2(cos(angle) * 560, sin(angle) * 230)
+		var center = level.encounter_centers[wave - 1]
+		var point = center + Vector2(cos(angle) * 280, sin(angle) * 170)
 		if point.distance_to(player.position) < 180:
-			point = arena.get_center() - (point - arena.get_center())
+			point = center - (point - center)
 		spawn_enemy("ranged" if i % level.ranged_interval == 0 else "melee", point, strength)
 	if wave == level.boss_wave:
-		spawn_enemy("boss", Vector2(1220, 440) if player.position.x < 720 else Vector2(220, 440), strength)
+		spawn_enemy("boss", level.encounter_centers[wave - 1] + Vector2(270, 0), strength)
 	wave_delay = level.wave_break
-	toast("WAVE %d / %d  —  %s" % [wave, level.wave_sizes.size(), "The Warden has arrived" if wave == level.boss_wave else "Clear the arena"], 3)
+	toast("WAVE %d / %d  —  %s" % [wave, level.wave_sizes.size(), "The Warden has arrived" if wave == level.boss_wave else "Clear this garden"], 3)
 
 func spawn_enemy(kind: String, point: Vector2, strength: float = 1.0) -> ArenaEnemy:
 	var enemy = ArenaEnemy.new()
@@ -190,10 +275,10 @@ func _on_enemy_killed(enemy: Node, _source: Node) -> void:
 	if gear != null:
 		drops.append({"position": enemy.position, "gear": gear})
 	if enemy.kind == "boss":
-		toast("The Warden falls. An Epic item awaits — clear the remaining enemies!", 4)
+		toast("The Warden falls. A yellow Rare item awaits — reach the eastern exit!", 4)
 	# A little sustain rewards finishing enemies without making gear swaps a heal.
 	if not player.dead:
-		player.health = minf(player.max_health, player.health + 4)
+		player.health = minf(player.max_health, player.health + 4 + equipment.bonus("life_on_kill"))
 	effect(enemy.position, enemy.radius + 12, Color("e7b273"), "ring")
 
 func _on_damaged(target: Node, amount: float, _source: Node) -> void:
@@ -207,7 +292,7 @@ func _on_equipment_changed() -> void:
 func pickup_nearby(all: bool = false) -> int:
 	var count = 0
 	for i in range(drops.size() - 1, -1, -1):
-		if all or player.position.distance_to(drops[i].position) <= 92:
+		if all or player.position.distance_to(drops[i].position) <= player.pickup_radius():
 			equipment.inventory.append(drops[i].gear)
 			drops.remove_at(i)
 			count += 1
@@ -218,8 +303,8 @@ func pickup_nearby(all: bool = false) -> int:
 		toast("Move close to a glowing drop and press F", 2)
 	return count
 
-func spawn_projectile(point: Vector2, direction: Vector2, damage: float, friendly: bool, blast_radius: float, color: Color) -> void:
-	projectiles.append({"position": point, "velocity": direction * (510 if friendly else 230), "damage": damage, "friendly": friendly, "radius": blast_radius, "life": 1.6 if friendly else 4.0, "color": color})
+func spawn_projectile(point: Vector2, direction: Vector2, damage: float, friendly: bool, blast_radius: float, color: Color, elite_bonus: float = 0.0) -> void:
+	projectiles.append({"position": point, "velocity": direction * (510 if friendly else 230), "damage": damage, "elite_bonus": elite_bonus, "friendly": friendly, "radius": blast_radius, "life": 1.6 if friendly else 4.0, "color": color})
 
 func tick_projectiles(delta: float) -> void:
 	for i in range(projectiles.size() - 1, -1, -1):
@@ -235,20 +320,21 @@ func tick_projectiles(delta: float) -> void:
 					break
 		else:
 			hit = Geometry2D.get_closest_point_to_segment(player.position, previous, shot.position).distance_to(player.position) < 22
-		if hit or shot.life <= 0 or not arena.has_point(shot.position):
+		if hit or shot.life <= 0 or not world_map.line_clear(previous, shot.position):
 			if shot.friendly:
 				for enemy in enemies.duplicate():
 					if not enemy.dead and enemy.position.distance_to(shot.position) <= shot.radius + enemy.radius:
-						enemy.take_damage(shot.damage, player)
+						enemy.take_damage(shot.damage * (1.0 + shot.elite_bonus / 100.0 if enemy.kind == "boss" else 1.0), player)
 				effect(shot.position, shot.radius, shot.color, "ring")
 			elif hit:
-				player.take_damage(shot.damage, self, events)
+				player.take_damage(shot.damage, self, events, "magic", "ranged")
 			projectiles.remove_at(i)
 
 func effect(point: Vector2, radius: float, color: Color, kind: String, angle: float = 0.0) -> void:
 	effects.append({"position": point, "radius": radius, "color": color, "kind": kind, "angle": angle, "life": 0.32})
 
 func finish(victory: bool) -> void:
+	clear_attack_input()
 	state = "victory" if victory else "defeat"
 	projectiles.clear()
 	if victory:
@@ -265,6 +351,7 @@ func finish(victory: bool) -> void:
 func restart() -> void:
 	if state == "victory":
 		expedition += 1
+		generate_map(map_rng.randi())
 	for enemy in enemies:
 		enemy.queue_free()
 	enemies.clear()
@@ -276,7 +363,11 @@ func restart() -> void:
 	elapsed = 0
 	wave_delay = 2.0
 	state = "combat"
-	player.position = arena.get_center()
+	clear_attack_input()
+	exit_hold = 0.0
+	numbers.clear()
+	player.position = level.spawn_point
+	update_camera()
 	player.dead = false
 	player.recalculate()
 	player.health = player.max_health
@@ -287,36 +378,48 @@ func restart() -> void:
 	if bag_open:
 		toggle_bag()
 	place_starting_supplies()
-	toast("Expedition %d · The next wave approaches" % expedition, 3)
+	toast("Expedition %d · Follow the road east" % expedition, 3)
 
 func toast(text: String, duration: float = 3.0) -> void:
 	message = text
 	message_time = duration
 
 func _draw() -> void:
-	draw_rect(arena.grow(8), Color("293c40"))
-	draw_rect(arena, BG)
-	# A quiet stone grid, inset garden beds, and ritual markings give the arena scale.
-	for x in range(48, 1393, 48):
-		draw_line(Vector2(x, 142), Vector2(x, 736), Color("18272e"), 1)
-	for y in range(142, 737, 48):
-		draw_line(Vector2(48, y), Vector2(1392, y), Color("18272e"), 1)
-	var center = arena.get_center()
-	draw_arc(center, 165, 0, TAU, 96, Color("25373b"), 2)
-	draw_arc(center, 155, 0, TAU, 96, Color("1c2d33"), 1)
-	for i in range(12):
-		var direction = Vector2.from_angle(i * TAU / 12)
-		draw_line(center + direction * 148, center + direction * 170, Color("34474a"), 2)
-	for point in [Vector2(60, 154), Vector2(1380, 154), Vector2(60, 724), Vector2(1380, 724)]:
-		draw_circle(point, 7, GOLD)
-		draw_circle(point, 16, Color(0.9, 0.65, 0.3, 0.06))
+	if level == null:
+		return
+	# Trails join three clearings, with grass outside the traversable map.
+	draw_rect(arena.grow(60), Color("0c191a"))
+	for region in level.walkable_regions:
+		draw_rect(region.grow(6), Color("344740"))
+	for region in level.walkable_regions:
+		draw_rect(region, BG)
+		for x in range(int(region.position.x) + 24, int(region.end.x), 48):
+			for y in range(int(region.position.y) + 24, int(region.end.y), 48):
+				draw_circle(Vector2(x, y), 2, Color("263939"))
+	for index in range(level.encounter_centers.size()):
+		var center = level.encounter_centers[index]
+		draw_arc(center, 150, 0, TAU, 64, Color("2e4143"), 3)
+		draw_string(ThemeDB.fallback_font, center + Vector2(-80, -205), ["I · OUTER GARDEN", "II · STONE CROSSING", "III · WARDEN'S COURT"][index], HORIZONTAL_ALIGNMENT_LEFT, -1, 18, MUTED)
+	for x in range(390, int(level.exit_point.x) - 120, 330):
+		var point = Vector2(x, level.spawn_point.y)
+		draw_polyline(PackedVector2Array([point + Vector2(-10, -10), point, point + Vector2(-10, 10)]), Color("58716a"), 3)
+	draw_string(ThemeDB.fallback_font, level.spawn_point + Vector2(-65, -100), "CAMP · HEAD EAST →", HORIZONTAL_ALIGNMENT_LEFT, -1, 18, GOLD)
+	var exit_color = GOLD if exit_ready() else MUTED
+	draw_circle(level.exit_point, level.exit_radius, Color(exit_color, 0.09))
+	draw_arc(level.exit_point, level.exit_radius, 0, TAU, 64, exit_color, 3)
+	if exit_hold > 0:
+		draw_arc(level.exit_point, level.exit_radius - 8, -PI / 2, -PI / 2 + TAU * exit_hold / level.exit_hold_seconds, 64, GOLD, 6)
+	var exit_text = "STAND HERE · %.1fs" % maxf(0, level.exit_hold_seconds - exit_hold) if exit_ready() else "EXIT LOCKED · CLEAR THE GARDENS"
+	draw_string(ThemeDB.fallback_font, level.exit_point + Vector2(-145, -85), exit_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, exit_color)
+	if is_instance_valid(aim_target) and not aim_target.dead:
+		draw_arc(aim_target.position, aim_target.radius + 7, 0, TAU, 32, GOLD, 2)
 	for drop in drops:
 		var point: Vector2 = drop.position
 		var tint: Color = Gear.COLORS[drop.gear.rarity]
 		draw_circle(point, 17, Color(tint, 0.12))
 		draw_line(point + Vector2(0, -8), point + Vector2(0, -34), Color(tint, 0.45), 2)
 		draw_colored_polygon(PackedVector2Array([point + Vector2(0, -9), point + Vector2(7, 0), point + Vector2(0, 9), point + Vector2(-7, 0)]), tint)
-		if is_instance_valid(player) and point.distance_to(player.position) < 92:
+		if is_instance_valid(player) and point.distance_to(player.position) <= player.pickup_radius():
 			draw_string(ThemeDB.fallback_font, point + Vector2(-65, -40), "[F] " + drop.gear.definition.title, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, tint)
 	for enemy in enemies:
 		if enemy.boss_windup > 0:
@@ -382,6 +485,14 @@ func panel(point: Vector2, dimensions: Vector2, color: Color = Color("14252d")) 
 func build_ui() -> void:
 	ui = CanvasLayer.new()
 	add_child(ui)
+	# Keep the scrolling world behind fixed HUD bands.
+	for rect in [Rect2(0, 0, 1440, 142), Rect2(0, 736, 1440, 164)]:
+		var mask = ColorRect.new()
+		mask.position = rect.position
+		mask.size = rect.size
+		mask.color = Color("0c171d")
+		mask.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		ui.add_child(mask)
 	var heading = label("EMBERFIELD", 30, GOLD)
 	heading.position = Vector2(48, 24)
 	ui.add_child(heading)
@@ -399,6 +510,7 @@ func build_ui() -> void:
 	bag_button.size = Vector2(190, 48)
 	ui.add_child(bag_button)
 	var help_button = button("HELP [H]", func():
+		clear_attack_input()
 		help_open = not help_open
 		help_panel.visible = help_open)
 	help_button.position = Vector2(1272, 30)
@@ -422,7 +534,7 @@ func build_ui() -> void:
 	health_box.add_child(stat_label)
 	for index in range(2):
 		var slot = "weapon" if index == 0 else "offhand"
-		var skill = button("", func(): abilities.use(slot, get_global_mouse_position()), GOLD)
+		var skill = button("", func(): assisted_attack(slot), GOLD)
 		skill.position = Vector2(414 + index * 250, 758)
 		skill.size = Vector2(236, 100)
 		ui.add_child(skill)
@@ -456,7 +568,7 @@ func build_ui() -> void:
 	help_box.add_theme_constant_override("separation", 18)
 	help_panel.add_child(help_box)
 	help_box.add_child(label("A FIELD GUIDE", 28, GOLD))
-	help_box.add_child(label("Move with WASD or arrows. Aim with the mouse.\nHold LMB / Q for Weapon; hold RMB / E for Offhand.\nF collects nearby drops. I opens equipment and pauses combat.\nClick a bag item to equip it. Click worn gear to remove it.\n\nBasic skills attack continuously. Power skills have a cooldown.\nBoth active slots accept either kind — try any combination.\nToughness adds 65 HP. Bloodlust grants +40% damage after kills.\n\nClear 3 waves and defeat the Warden. Avoid its orange warning circle.\nKills restore 4 HP. On completion, all loot is collected.\nR continues with your gear. Closing the game resets all progress.", 17))
+	help_box.add_child(label("Move with WASD or arrows. Mouse attacks assist nearby targets. Q / E auto-aim.\nHold LMB / Q for Weapon; hold RMB / E for Offhand.\nF collects nearby drops. I opens equipment and pauses combat.\nClick a slot to filter the bag. Use its x button to remove gear.\n\nBasic skills attack continuously. Power skills have a cooldown.\nBoth active slots accept either kind — try any combination.\nToughness adds 65 HP. Bloodlust grants +40% damage after kills.\n\nFollow the road east through 3 gardens. Defeat the Warden.\nKills restore 4 HP plus gear bonuses. On completion, all loot is collected.\nStand in the eastern exit for 2.5s to advance. R retries after defeat.", 17))
 	help_box.add_child(button("RETURN TO THE FIELD  [H / ESC]", func():
 		help_open = false
 		help_panel.hide(), GOLD))
@@ -474,7 +586,7 @@ func build_inventory_ui() -> void:
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(title)
 	row.add_child(button("CLOSE [I]", toggle_bag))
-	outer.add_child(label("PAUSED · Click gear to equip / remove. Hover for stats.", 13, MUTED))
+	outer.add_child(label("PAUSED · Select a slot to filter. Click bag gear to equip.", 13, MUTED))
 	var columns = HBoxContainer.new()
 	columns.add_theme_constant_override("separation", 12)
 	columns.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -490,7 +602,12 @@ func build_inventory_ui() -> void:
 	var right = VBoxContainer.new()
 	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	columns.add_child(right)
-	right.add_child(label("BAG  /  CLICK TO EQUIP", 13, MUTED))
+	inventory_filter_picker = OptionButton.new()
+	inventory_filter_picker.add_item("ALL EQUIPMENT")
+	for slot in Equipment.SLOTS:
+		inventory_filter_picker.add_item(slot.to_upper())
+	inventory_filter_picker.item_selected.connect(func(index): select_inventory_slot("" if index == 0 else Equipment.SLOTS[index - 1]))
+	right.add_child(inventory_filter_picker)
 	var scroll = ScrollContainer.new()
 	scroll.custom_minimum_size.y = 370
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -508,14 +625,28 @@ func build_character_ui() -> void:
 	character_panel.add_child(box)
 	box.add_child(label("CHARACTER", 24, GOLD))
 	box.add_child(label("Your current totals · All equipped items and passives included", 13, MUTED))
+	var scroll = ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	box.add_child(scroll)
+	var content = VBoxContainer.new()
+	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(content)
 	var grid = GridContainer.new()
 	grid.columns = 2
 	grid.add_theme_constant_override("h_separation", 24)
 	grid.add_theme_constant_override("v_separation", 8)
-	box.add_child(grid)
+	content.add_child(grid)
 	var titles = {
 		"health": "Health",
-		"attack": "Equipment attack bonus",
+		"physical_attack": "Physical / spell attack",
+		"armor": "Armor / magic resistance",
+		"added_damage": "Added physical / spell damage",
+		"cooldown_reduction": "Power cooldown reduction",
+		"pickup_radius": "Pickup radius",
+		"recovery": "Regen / health per kill",
+		"elite": "Elite damage / reduction",
+		"reduction": "Melee / ranged reduction",
 		"attack_speed": "Attack speed",
 		"move_speed": "Movement speed",
 		"damage_multiplier": "Damage multiplier",
@@ -529,16 +660,16 @@ func build_character_ui() -> void:
 		value.mouse_filter = Control.MOUSE_FILTER_PASS
 		grid.add_child(value)
 		character_values[key] = value
-	box.add_child(HSeparator.new())
-	box.add_child(label("ACTIVE SKILLS  /  FINAL DAMAGE PER HIT", 13, GOLD))
+	content.add_child(HSeparator.new())
+	content.add_child(label("ACTIVE SKILLS  /  FINAL DAMAGE PER HIT", 13, GOLD))
 	for index in range(2):
 		var skill = label("", 15)
-		box.add_child(skill)
+		content.add_child(skill)
 		character_skills.append(skill)
-	box.add_child(HSeparator.new())
-	box.add_child(label("PASSIVE EFFECTS", 13, GOLD))
+	content.add_child(HSeparator.new())
+	content.add_child(label("PASSIVE EFFECTS", 13, GOLD))
 	character_passives = label("", 14, MUTED)
-	box.add_child(character_passives)
+	content.add_child(character_passives)
 	character_panel.hide()
 
 func refresh_character_stats() -> void:
@@ -546,12 +677,17 @@ func refresh_character_stats() -> void:
 		return
 	character_values.health.text = "%.1f / %.1f" % [player.health, player.max_health]
 	character_values.health.tooltip_text = "Maximum: 140 base + %.1f equipment + %d Toughness" % [equipment.bonus("health"), 65 if equipment.has_passive("toughness") else 0]
-	character_values.attack.text = "+%.1f" % player.attack
-	character_values.attack.tooltip_text = "Added to each active skill's base damage before the damage multiplier."
-	character_values.attack_speed.text = "%.2fx  (+%.1f%%)" % [player.attack_speed, equipment.bonus("attack_speed")]
-	character_values.attack_speed.tooltip_text = "Basic attacks: %.2f attacks per second. Power cooldowns are fixed." % (2.4 * player.attack_speed)
+	character_values.physical_attack.text = "+%.1f / +%.1f" % [player.physical_attack, player.magic_attack]
+	character_values.armor.text = "%.1f / %.1f" % [player.armor, player.magic_resist]
+	character_values.armor.tooltip_text = "Damage taken = incoming damage x 100 / (100 + armor or magic resistance)."
+	character_values.added_damage.text = "+%.1f / +%.1f" % [equipment.bonus("added_physical"), equipment.bonus("added_magic")]
+	character_values.cooldown_reduction.text = "%.1f%% (cap 40%%)" % (player.cooldown_reduction * 100)
+	character_values.pickup_radius.text = "%.1f px" % player.pickup_radius()
+	character_values.recovery.text = "%.1f/s / %.1f" % [equipment.bonus("health_regen"), 4.0 + equipment.bonus("life_on_kill")]
+	character_values.elite.text = "+%.1f%% / %.1f%%" % [equipment.bonus("elite_damage"), minf(35, equipment.bonus("elite_reduction"))]
+	character_values.reduction.text = "%.1f%% / %.1f%%" % [minf(60, equipment.bonus("melee_reduction")), minf(60, equipment.bonus("ranged_reduction"))]
+	character_values.attack_speed.text = "%.2f attacks/s" % (2.4 * player.attack_speed)
 	character_values.move_speed.text = "%.1f px/s" % player.move_speed
-	character_values.move_speed.tooltip_text = "245 base + %.1f equipment" % equipment.bonus("speed")
 	character_values.damage_multiplier.text = "%.2fx" % player.damage_multiplier()
 	character_values.damage_multiplier.tooltip_text = "Bloodlust grants +40% damage while active."
 	for index in range(2):
@@ -561,9 +697,9 @@ func refresh_character_stats() -> void:
 			character_skills[index].text = "%s: Empty\nEquip an item to gain an active skill." % slot.capitalize()
 			continue
 		var ability = gear.definition.ability
-		var damage = (ability.damage + player.attack) * player.damage_multiplier()
-		var timing = "%.2f attacks/s" % (2.4 * player.attack_speed) if ability.kind == "basic" else "%.1fs cooldown" % ability.cooldown
-		character_skills[index].text = "%s: %s  ·  %.1f damage  ·  %s\n(%.1f skill + %.1f equipment) x %.2f" % [slot.capitalize(), ability.title, damage, timing, ability.damage, player.attack, player.damage_multiplier()]
+		var damage = player.skill_damage(ability)
+		var timing = "%.2f attacks/s" % (2.4 * player.attack_speed) if ability.kind == "basic" else "%.2fs cooldown" % player.effective_cooldown(ability)
+		character_skills[index].text = "%s: %s · %.1f damage · %s\n%s damage + %.1f%% skill bonus; elite damage +%.1f%%" % [slot.capitalize(), ability.title, damage, timing, "Physical" if ability.id in ["slash", "cleave"] else "Spell", equipment.bonus("skill_damage:" + ability.id), equipment.bonus("elite_damage")]
 	var toughness = "+65 maximum health" if equipment.has_passive("toughness") else "Not equipped"
 	var bloodlust = "On kill: +40% damage for 4s" if equipment.has_passive("bloodlust") else "Not equipped"
 	if player.bloodlust > 0:
@@ -571,12 +707,20 @@ func refresh_character_stats() -> void:
 	character_passives.text = "Toughness: %s\nBloodlust: %s" % [toughness, bloodlust]
 
 func toggle_bag() -> void:
+	clear_attack_input()
 	bag_open = not bag_open
 	inventory_panel.visible = bag_open
 	character_panel.visible = bag_open
 	end_panel.visible = state != "combat" and not bag_open
 	if bag_open:
 		refresh_inventory()
+
+func select_inventory_slot(slot: String) -> void:
+	if slot != "" and not slot in Equipment.SLOTS:
+		return
+	inventory_filter = slot
+	inventory_filter_picker.select(0 if slot == "" else Equipment.SLOTS.find(slot) + 1)
+	refresh_inventory()
 
 func refresh_inventory() -> void:
 	refresh_character_stats()
@@ -590,21 +734,37 @@ func refresh_inventory() -> void:
 		var gear: Gear = equipment.slots[slot]
 		var text = slot.to_upper() + "\n"
 		text += gear.definition.title + " · " + gear.definition.ability.title if gear != null else "Empty — no skill"
-		var entry = button(text, func(): equipment.unequip(slot), Gear.COLORS[gear.rarity] if gear != null else MUTED)
+		var row = HBoxContainer.new()
+		equipped_list.add_child(row)
+		var entry = button(text, func(): select_inventory_slot(slot), Gear.COLORS[gear.rarity] if gear != null else MUTED)
+		entry.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		entry.clip_text = true
+		entry.custom_minimum_size.x = 225
+		if inventory_filter == slot:
+			entry.add_theme_stylebox_override("normal", style(Color("2b444c"), GOLD))
 		entry.add_theme_font_size_override("font_size", 13)
-		entry.tooltip_text = gear.details() + "\nClick to remove" if gear != null else "Equip an item from the bag"
-		equipped_list.add_child(entry)
+		entry.tooltip_text = gear.details() + "\nClick to show matching items" if gear != null else "Click to show matching items"
+		row.add_child(entry)
+		var remove = button("×", func(): equipment.unequip(slot), MUTED)
+		remove.tooltip_text = "Unequip " + slot
+		remove.disabled = gear == null
+		row.add_child(remove)
+	var shown = 0
 	for index in range(equipment.inventory.size()):
 		var gear = equipment.inventory[index]
-		var text = "%s  +%d\n%s · %s" % [gear.definition.title, gear.level, gear.definition.slot.capitalize(), gear.definition.ability.title]
+		if inventory_filter != "" and gear.definition.slot != inventory_filter:
+			continue
+		shown += 1
+		var text = "%s  Lv.%d · %dP / %dS\n%s · %s" % [gear.definition.title, gear.level, gear.primary_count(), gear.secondary_affixes.size(), gear.definition.slot.capitalize(), gear.definition.ability.title]
 		var entry = button(text, func(): equipment.equip(index), Gear.COLORS[gear.rarity])
+		entry.clip_text = true
 		entry.alignment = HORIZONTAL_ALIGNMENT_LEFT
 		entry.add_theme_font_size_override("font_size", 13)
 		var worn: Gear = equipment.slots[gear.definition.slot]
 		entry.tooltip_text = gear.details() + "\n\nCURRENTLY EQUIPPED\n" + (worn.details() if worn != null else "Empty")
 		inventory_list.add_child(entry)
-	if equipment.inventory.is_empty():
-		inventory_list.add_child(label("No spare gear. Hunt for drops.", 13, MUTED))
+	if shown == 0:
+		inventory_list.add_child(label("No matching items." if inventory_filter != "" else "No spare gear. Hunt for drops.", 13, MUTED))
 
 func update_ui() -> void:
 	if bag_open:
@@ -612,12 +772,21 @@ func update_ui() -> void:
 	hp_bar.max_value = player.max_health
 	hp_bar.value = player.health
 	hp_label.text = "VITALITY     %d / %d" % [ceili(player.health), ceili(player.max_health)]
-	stat_label.text = "+%d damage   ·   %.2fx attack speed   ·   %d move" % [int(player.attack), player.attack_speed, int(player.move_speed)]
-	objective.text = "EXPEDITION %02d    /    WAVE %d OF %d" % [expedition, wave, level.wave_sizes.size()]
+	stat_label.text = "ATK %.0f / spell %.0f   ·   %d move" % [player.physical_attack, player.magic_attack, int(player.move_speed)]
+	objective.text = "EXPEDITION %02d    /    GARDEN %d OF %d" % [expedition, wave, level.wave_sizes.size()]
 	if state == "combat":
-		info_label.text = "%d enemies remain  ·  %d defeated  ·  %s" % [enemies.size(), kills, "PAUSED" if bag_open or help_open else ("Collect [F] and equip [I] a weapon to begin" if wave == 0 and equipment.slots.weapon == null and equipment.slots.offhand == null else ("Next wave in %.1fs" % maxf(0, wave_delay) if enemies.is_empty() else "Clear the field"))]
+		var hint = "Head east → next garden"
+		if bag_open or help_open:
+			hint = "PAUSED"
+		elif wave == 0 and equipment.slots.weapon == null and equipment.slots.offhand == null:
+			hint = "Collect [F] and equip [I] a weapon"
+		elif not enemies.is_empty():
+			hint = "Clear this garden · %d enemies" % enemies.size()
+		elif exit_ready():
+			hint = "Exit → stand %.1fs to advance" % maxf(0, level.exit_hold_seconds - exit_hold)
+		info_label.text = "%d defeated · %d%% explored · %s" % [kills, clampi(int(100 * (player.position.x - level.spawn_point.x) / (level.exit_point.x - level.spawn_point.x)), 0, 100), hint]
 	else:
-		info_label.text = "FIELD CLEARED · [R] NEXT EXPEDITION" if state == "victory" else "DEFEATED · [R] RETRY"
+		info_label.text = "DEFEATED · [R] RETRY"
 	for index in range(2):
 		var slot = "weapon" if index == 0 else "offhand"
 		var gear: Gear = equipment.slots[slot]
@@ -634,4 +803,4 @@ func update_ui() -> void:
 	for slot in ["helmet", "necklace"]:
 		var gear: Gear = equipment.slots[slot]
 		passives.append("%s: %s" % [slot.capitalize(), gear.definition.ability.title if gear != null else "Empty"])
-	passive_label.text = "PASSIVES   /   " + "  ·  ".join(passives) + "\n" + ("BLOODLUST  +40%% damage  ·  %.1fs" % player.bloodlust if player.bloodlust > 0 else "Collect glowing drops with F · Clear all 3 waves to advance")
+	passive_label.text = "PASSIVES   /   " + "  ·  ".join(passives) + "\n" + ("BLOODLUST  +40%% damage  ·  %.1fs" % player.bloodlust if player.bloodlust > 0 else "Collect glowing drops with F · Head east to the exit")

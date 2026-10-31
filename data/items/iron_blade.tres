@@ -9,7 +9,3 @@ id = "iron_blade"
 title = "Iron Blade"
 slot = "weapon"
 ability = ExtResource("2")
-health = 0.0
-attack = 7.0
-speed = 0.0
-attack_speed = 5.0

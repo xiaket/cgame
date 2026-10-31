@@ -9,7 +9,3 @@ id = "winter_focus"
 title = "Winter Focus"
 slot = "weapon"
 ability = ExtResource("2")
-health = 10.0
-attack = 8.0
-speed = 0.0
-attack_speed = 0.0

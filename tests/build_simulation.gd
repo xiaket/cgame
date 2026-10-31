@@ -5,31 +5,33 @@ var failures: int = 0
 func _initialize() -> void:
 	call_deferred("run")
 
+func fixture(id: String) -> Gear:
+	var gear = Gear.new(Catalog.item(id), 0, 1, false)
+	var key = "magic_attack" if id in ["ember_wand", "frost_orb"] else "physical_attack"
+	gear.primary_affixes.append({"id": "health" if id == "oak_helm" else key, "value": 18.0 if id == "oak_helm" else 7.0})
+	return gear
+
 func run() -> void:
-	for build in [["crescent_axe", "frost_orb"], ["ember_wand", "frost_orb"]]:
+	for build in [["crescent_axe", "frost_orb", 713], ["ember_wand", "frost_orb", 713], ["crescent_axe", "frost_orb", 99], ["ember_wand", "frost_orb", 99], ["crescent_axe", "frost_orb", 2026], ["ember_wand", "frost_orb", 2026]]:
 		seed(713)
 		var game = load("res://scenes/main.tscn").instantiate()
+		game.map_seed = build[2]
 		root.add_child(game)
 		game.set_process(false)
 		game.expedition = 1
-		game.equipment.slots.helmet = Gear.new(Catalog.item("oak_helm"))
-		game.equipment.slots.necklace = Gear.new(Catalog.item("ruby_pendant"))
-		game.equipment.slots.weapon = Gear.new(Catalog.item(build[0]))
-		game.equipment.slots.offhand = Gear.new(Catalog.item(build[1]))
+		game.equipment.slots.helmet = fixture("oak_helm")
+		game.equipment.slots.necklace = fixture("ruby_pendant")
+		game.equipment.slots.weapon = fixture(build[0])
+		game.equipment.slots.offhand = fixture(build[1])
 		game.player.recalculate()
 		game.player.health = game.player.max_health
 		await process_frame
 		var dt = 1.0 / 60.0
 		var duration = 0.0
-		while duration < 360 and game.state == "combat":
+		var completed_kills = []
+		game.events.level_completed.connect(func(_number): completed_kills.append(game.kills))
+		while duration < 360 and game.state == "combat" and game.expedition == 1:
 			duration += dt
-			if game.enemies.is_empty():
-				game.wave_delay -= dt
-				if game.wave_delay <= 0:
-					if game.wave == 3:
-						game.finish(true)
-						break
-					game.spawn_wave()
 			var nearest: ArenaEnemy = null
 			var nearest_distance = INF
 			for enemy in game.enemies:
@@ -37,7 +39,8 @@ func run() -> void:
 				if distance < nearest_distance:
 					nearest = enemy
 					nearest_distance = distance
-			var movement = Vector2.ZERO
+			var destination: Vector2 = game.level.exit_point if game.wave == 3 else Vector2(game.level.encounter_triggers[game.wave] + 100, 439)
+			var movement = game.player.position.direction_to(destination) if game.player.position.distance_to(destination) > 6 else Vector2.ZERO
 			if nearest != null:
 				var toward: Vector2 = game.player.position.direction_to(nearest.position)
 				var desired_range = 78.0 if build[0] == "crescent_axe" else 260.0
@@ -55,7 +58,7 @@ func run() -> void:
 							movement = Vector2.DOWN
 				# Steer away from arena edges when retreating.
 				var next: Vector2 = game.player.position + movement * 60
-				if not game.arena.grow(-35).has_point(next):
+				if not game.world_map.contains(next, 35):
 					movement = toward.orthogonal()
 				game.abilities.use("weapon", nearest.position)
 				if nearest_distance < 175:
@@ -67,13 +70,15 @@ func run() -> void:
 			game.tick_projectiles(dt)
 			if game.player.dead:
 				game.finish(false)
+			else:
+				game.tick_progression(dt)
 			# Release queued enemies and avoid accumulating debug effects.
 			if int(duration / dt) % 60 == 0:
 				game.effects.clear()
 				game.numbers.clear()
 				await process_frame
-		print("BUILD %s + %s: %s / %d kills / %.1fs / %.0f HP" % [build[0], build[1], game.state, game.kills, duration, game.player.health])
-		if game.state != "victory":
+		print("BUILD %s + %s: %s / %d kills / %.1fs / %.0f HP" % [build[0], build[1], "next level" if game.expedition == 2 else game.state, completed_kills[0] if not completed_kills.is_empty() else game.kills, duration, game.player.health])
+		if game.expedition != 2 or completed_kills != [28]:
 			failures += 1
 		game.queue_free()
 		await process_frame
